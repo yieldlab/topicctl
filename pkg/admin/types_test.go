@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/segmentio/kafka-go"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -617,4 +618,108 @@ func TestDiffHelpers(t *testing.T) {
 		[]int{3, 4},
 		NewLeaderPartitions(curr, desired),
 	)
+}
+
+func TestGetThrottleConfigEntries(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    map[string]string
+		expected []kafka.ConfigEntry
+	}{
+		{
+			name:     "empty map",
+			input:    map[string]string{},
+			expected: []kafka.ConfigEntry{},
+		},
+		{
+			name: "no throttle settings",
+			input: map[string]string{
+				"retention.ms":        "3600000",
+				"cleanup.policy":      "delete",
+				"min.insync.replicas": "2",
+			},
+			expected: []kafka.ConfigEntry{},
+		},
+		{
+			name: "only throttle settings",
+			input: map[string]string{
+				"leader.replication.throttled.replicas":   "*",
+				"follower.replication.throttled.replicas": "*",
+			},
+			expected: []kafka.ConfigEntry{
+				{ConfigName: "leader.replication.throttled.replicas", ConfigValue: "*"},
+				{ConfigName: "follower.replication.throttled.replicas", ConfigValue: "*"},
+			},
+		},
+		{
+			name: "mixed settings with throttles",
+			input: map[string]string{
+				"retention.ms":                            "3600000",
+				"cleanup.policy":                          "delete",
+				"leader.replication.throttled.replicas":   "0:1,1:2",
+				"follower.replication.throttled.replicas": "0:2,1:3",
+				"min.insync.replicas":                     "2",
+			},
+			expected: []kafka.ConfigEntry{
+				{ConfigName: "leader.replication.throttled.replicas", ConfigValue: "0:1,1:2"},
+				{ConfigName: "follower.replication.throttled.replicas", ConfigValue: "0:2,1:3"},
+			},
+		},
+		{
+			name: "broker throttle settings",
+			input: map[string]string{
+				"leader.replication.throttled.rate.max.bytes.per.second":   "20000000",
+				"follower.replication.throttled.rate.max.bytes.per.second": "20000000",
+				"log.retention.hours": "168",
+			},
+			expected: []kafka.ConfigEntry{
+				{ConfigName: "leader.replication.throttled.rate.max.bytes.per.second", ConfigValue: "20000000"},
+				{ConfigName: "follower.replication.throttled.rate.max.bytes.per.second", ConfigValue: "20000000"},
+			},
+		},
+		{
+			name: "case insensitive throttle matching",
+			input: map[string]string{
+				"Leader.Replication.Throttled.Replicas":   "0:1",
+				"FOLLOWER.REPLICATION.THROTTLED.REPLICAS": "0:2",
+				"retention.ms": "3600000",
+			},
+			expected: []kafka.ConfigEntry{
+				{ConfigName: "Leader.Replication.Throttled.Replicas", ConfigValue: "0:1"},
+				{ConfigName: "FOLLOWER.REPLICATION.THROTTLED.REPLICAS", ConfigValue: "0:2"},
+			},
+		},
+		{
+			name: "settings with throttle in value but not name",
+			input: map[string]string{
+				"retention.ms":   "3600000",
+				"description":    "this topic has throttle limits",
+				"cleanup.policy": "delete",
+			},
+			expected: []kafka.ConfigEntry{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := GetThrottleConfigEntries(tt.input)
+
+			// Check length
+			assert.Equal(t, len(tt.expected), len(result), "expected %d entries, got %d", len(tt.expected), len(result))
+
+			// Convert slices to maps for comparison (since map iteration order is random)
+			expectedMap := make(map[string]string)
+			for _, entry := range tt.expected {
+				expectedMap[entry.ConfigName] = entry.ConfigValue
+			}
+
+			resultMap := make(map[string]string)
+			for _, entry := range result {
+				resultMap[entry.ConfigName] = entry.ConfigValue
+			}
+
+			// Compare maps
+			assert.Equal(t, expectedMap, resultMap)
+		})
+	}
 }

@@ -736,7 +736,7 @@ func TestApplyThrottles(t *testing.T) {
 	assert.False(t, throttledTopic)
 	assert.Equal(t, 0, len(throttledBrokers))
 
-	err = applier.removeThottles(ctx, throttledTopic, throttledBrokers)
+	err = applier.removeThrottles(ctx, throttledTopic, throttledBrokers)
 	assert.NoError(t, err)
 
 	_, err = applier.adminClient.UpdateBrokerConfig(
@@ -817,7 +817,7 @@ func TestApplyThrottles(t *testing.T) {
 		}
 	}
 
-	err = applier.removeThottles(ctx, throttledTopic, throttledBrokers)
+	err = applier.removeThrottles(ctx, throttledTopic, throttledBrokers)
 	require.NoError(t, err)
 
 	topicInfo, err = applier.adminClient.GetTopic(ctx, topicName, false)
@@ -899,6 +899,73 @@ func TestApplyOverrides(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(50000000), applier.throttleBytes)
 	assert.Equal(t, applier.maxBatchSize, 8)
+}
+
+func TestApplyKeepThrottle(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	topicName := util.RandomString("apply-keep-throttle-", 6)
+	topicConfig := config.TopicConfig{
+		Meta: config.ResourceMeta{
+			Name:        topicName,
+			Cluster:     "test-cluster",
+			Region:      "test-region",
+			Environment: "test-environment",
+		},
+		Spec: config.TopicSpec{
+			Partitions:        3,
+			ReplicationFactor: 2,
+			RetentionMinutes:  500,
+			PlacementConfig: config.TopicPlacementConfig{
+				Strategy: config.PlacementStrategyStatic,
+				Picker:   config.PickerMethodLowestIndex,
+				StaticAssignments: [][]int{
+					{1, 2},
+					{2, 3},
+					{1, 3},
+				},
+			},
+			MigrationConfig: &config.TopicMigrationConfig{
+				ThrottleMB:         2,
+				PartitionBatchSize: 3,
+			},
+			Settings: config.TopicSettings{
+				"leader.replication.throttled.replicas":   "*",
+				"follower.replication.throttled.replicas": "*",
+			},
+		},
+	}
+	applier := testApplier(ctx, t, topicConfig)
+	defer applier.adminClient.Close()
+	err := applier.Apply(ctx)
+	require.NoError(t, err)
+
+	topicInfo, err := applier.adminClient.GetTopic(ctx, topicName, true)
+	require.NoError(t, err)
+	assert.Equal(t, "*", topicInfo.Config["leader.replication.throttled.replicas"])
+	assert.Equal(t, "*", topicInfo.Config["follower.replication.throttled.replicas"])
+
+	supported := applier.adminClient.GetSupportedFeatures()
+	if !(supported.Locks && supported.DynamicBrokerConfigs) {
+		return
+	}
+
+	// Rebalance with different static assignments
+	applier.topicConfig.Spec.PlacementConfig.StaticAssignments = [][]int{
+		{2, 3},
+		{3, 1},
+		{1, 2},
+	}
+	applier.config.KeepThrottle = true
+	err = applier.Apply(ctx)
+	require.NoError(t, err)
+
+	topicInfo, err = applier.adminClient.GetTopic(ctx, topicName, true)
+	require.NoError(t, err)
+
+	// Wildcard throttles should be preserved
+	assert.Equal(t, "*", topicInfo.Config["leader.replication.throttled.replicas"])
+	assert.Equal(t, "*", topicInfo.Config["follower.replication.throttled.replicas"])
 }
 
 func testTopicName(name string) string {
