@@ -357,9 +357,9 @@ type zkClusterID struct {
 }
 
 type zkControllerInfo struct {
-	Version    int    `json:"version"`
-	BrokerID   int    `json:"brokerid"`
-	Timestamp  string `json:"timestamp"`
+	Version   int    `json:"version"`
+	BrokerID  int    `json:"brokerid"`
+	Timestamp string `json:"timestamp"`
 }
 
 type zkBrokerInfo struct {
@@ -1366,4 +1366,17 @@ func GetAllTopicNamesFromMetadata(
 	}
 
 	return topicsSet
+}
+
+func GetThrottleConfigEntries(m map[string]string) []kafka.ConfigEntry {
+	entries := make([]kafka.ConfigEntry, 0, len(m))
+	for name, value := range m {
+		if strings.Contains(strings.ToLower(name), "throttle") {
+			entries = append(entries, kafka.ConfigEntry{
+				ConfigName:  name,
+				ConfigValue: value,
+			})
+		}
+	}
+	return entries
 }

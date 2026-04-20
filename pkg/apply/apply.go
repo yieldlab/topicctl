@@ -38,6 +38,7 @@ type TopicApplierConfig struct {
 	IgnoreFewerPartitionsError bool
 	SleepLoopDuration          time.Duration
 	TopicConfig                config.TopicConfig
+	KeepThrottle               bool
 }
 
 // TopicApplier executes an "apply" run on a topic by comparing the actual
@@ -214,6 +215,24 @@ func (t *TopicApplier) applyExistingTopic(
 		return err
 	}
 
+	// Store applied topic/broker config to compare later against the config,
+	// that might change during applying the partition placement strategy
+	var appliedTopicInfo admin.TopicInfo
+	var appliedBrokerInfo []admin.BrokerInfo
+	if t.config.KeepThrottle {
+		log.Info("Get applied state for topic and brokers to be able to restore the throttle settings later")
+		var err error
+		appliedBrokerInfo, err = t.adminClient.GetBrokers(ctx, nil)
+		if err != nil {
+			return err
+		}
+
+		appliedTopicInfo, err = t.adminClient.GetTopic(ctx, t.topicName, true)
+		if err != nil {
+			return err
+		}
+	}
+
 	if err := t.updatePartitions(ctx, topicInfo); err != nil {
 		if errors.Is(err, ErrFewerPartitions) && t.config.IgnoreFewerPartitionsError {
 			log.Warnf("UpdatePartitions failure ignored. topic: %v, error: %v", t.topicName, err)
@@ -254,6 +273,28 @@ func (t *TopicApplier) applyExistingTopic(
 		}
 	}
 
+	// If the throttle settings need to be kept, the original settings should be re-applied
+	// Those settings can be originated from the topic/broker directly or from the applied configuration file
+	if t.config.KeepThrottle {
+		log.Info("Restoring throttle settings after rebalancing")
+
+		topicEntries := admin.GetThrottleConfigEntries(appliedTopicInfo.Config)
+		if len(topicEntries) > 0 {
+			if _, err := t.adminClient.UpdateTopicConfig(ctx, t.topicName, topicEntries, true); err != nil {
+				log.Warnf("Error updating topic %v config: %v", t.topicName, err)
+				return err
+			}
+		}
+
+		for _, brokerInfo := range appliedBrokerInfo {
+			brokerConfigs := admin.GetThrottleConfigEntries(brokerInfo.Config)
+			if _, err := t.adminClient.UpdateBrokerConfig(ctx, brokerInfo.ID, brokerConfigs, true); err != nil {
+				log.Warnf("Error updating broker %d config: %v", brokerInfo.ID, err)
+				return err
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -281,7 +322,7 @@ func (t *TopicApplier) checkExistingState(
 			return nil
 		}
 
-		if topicInfo.IsThrottled() {
+		if topicInfo.IsThrottled() && !t.config.KeepThrottle {
 			log.Infof(
 				"It looks there are still throttles on the topic (config: %+v)",
 				topicInfo.Config,
@@ -296,7 +337,7 @@ func (t *TopicApplier) checkExistingState(
 				} else if !ok {
 					log.Info("Skipping removal")
 				}
-				if err := t.removeThottles(ctx, true, nil); err != nil {
+				if err := t.removeThrottles(ctx, true, nil); err != nil {
 					return err
 				}
 			}
@@ -340,7 +381,7 @@ func (t *TopicApplier) checkExistingState(
 						log.Info("Skipping removal")
 						return nil
 					}
-					if err := t.removeThottles(ctx, false, throttledBrokers); err != nil {
+					if err := t.removeThrottles(ctx, false, throttledBrokers); err != nil {
 						return err
 					}
 				}
@@ -1065,8 +1106,11 @@ outerLoop:
 		}
 	}
 
+	if t.config.KeepThrottle {
+		return nil
+	}
 	// Only remove throttles if apply was successful
-	return t.removeThottles(ctx, throttledTopic, throttledBrokers)
+	return t.removeThrottles(ctx, throttledTopic, throttledBrokers)
 }
 
 func (t *TopicApplier) applyThrottles(
@@ -1142,7 +1186,7 @@ func (t *TopicApplier) applyThrottles(
 	return throttledTopic, throttledBrokers, nil
 }
 
-func (t *TopicApplier) removeThottles(
+func (t *TopicApplier) removeThrottles(
 	ctx context.Context,
 	throttledTopic bool,
 	throttledBrokers []int,
